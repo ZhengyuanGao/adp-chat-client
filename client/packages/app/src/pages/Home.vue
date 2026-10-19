@@ -356,6 +356,7 @@ const handleConversationChange = (conversationId: string) => {
         :showCloseButton="false"
         :showOverlayButton="false"
         :logoUrl="Logo"
+        :enableCronTask="false"
         :currentApplicationId="currentApplicationId"
         :currentConversationId="currentConversationId"
         :currentConversationChannel="currentConversationChannel"

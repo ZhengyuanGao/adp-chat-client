@@ -1,20 +1,45 @@
 import asyncio
 import logging
-
 import sanic
-from sanic.views import HTTPMethodView
-from sanic_restful_api import reqparse
+from sanic.exceptions import SanicException
 from sanic.request.types import Request
 from sanic.response import ResponseStream
-from sanic.exceptions import SanicException
+from sanic.views import HTTPMethodView
+from sanic_restful_api import reqparse
 
-from router import login_required, check_login
+from app_factory import TAgenticApp
 from core.chat import CoreChat
 from core.conversation import CoreConversation
 from core.share import CoreShareConversation
-from app_factory import TAgenticApp
+from core.account import CoreAccount
+from router import login_required, check_login
+from util.database import db_connection
+
 app: TAgenticApp = TAgenticApp.get_app()
 
+
+async def _build_extra_custom_variables(account_id: str) -> dict:
+    """从 DB 读取账号信息，构造要注入 ADP CustomVariables 的额外字段。
+
+    重要约定：
+    - /chat/message 走 SSE，中间件不注入 request.ctx.db，必须自己借还连接
+    - 借用范围要"最小化"，读完立刻还，绝不能跨越 SSE 流生命周期
+    - ADP 侧 CustomVariables 的 value 必须是 string，dict/list 需 json.dumps
+    """
+    import json  # 局部导入，避免影响模块加载顺序
+    async with db_connection() as db:
+        account = await CoreAccount.get(db, account_id)
+    if account is None:
+        raise SanicException("account not found", status_code=401)
+
+    extra: dict = {
+        "account": json.dumps({
+            "VisitorUserAccount": account.Name or "",
+            "ctSys": account.ExtraInfo.ctSys or "kwportal"
+        }, ensure_ascii=False),
+    }
+    # 如果 ExtraInfo 里还有自定义字段，需要平铺给 ADP，可在此处补充
+    return extra
 
 class ChatMessageApi(HTTPMethodView):
     @login_required
@@ -33,6 +58,13 @@ class ChatMessageApi(HTTPMethodView):
 
         application_id = args['ApplicationId']
         vendor_app = app.get_vendor_app(application_id)
+
+        # 附加后端自定义参数（例如账号信息）。必须在 streaming_fn 之外完成 DB 访问：
+        # /chat/message 在 middleware/database.py 的 _SKIP_SESSION_PATHS 白名单中，
+        # request.ctx 上没有 db 属性，且 SSE 响应可能持续数十秒，绝不能把连接带进流里。
+        args['CustomVariables'].update(
+            await _build_extra_custom_variables(request.ctx.account_id)
+        )
 
         logging.info(f"[ChatMessageApi] ApplicationId: {application_id},\n\
             CustomVariables: {args['CustomVariables']},\n\
